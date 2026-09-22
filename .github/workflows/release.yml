@@ -1,0 +1,430 @@
+name: Release — reusable
+
+# Publica una version de CODIGO (bump + changelog + tag + GitHub Release +
+# PR de sync a develop) y, si se configura db_paths_regex, tambien una linea
+# de version de BASE DE DATOS independiente (tag db-vX.Y.Z propio). NO
+# despliega nada: publicar != desplegar (eso es deploy-render.yml /
+# deploy-vercel.yml, en otro workflow).
+#
+# Se dispara cuando el caller mergea el PR (normalmente develop -> main o
+# hotfix/* -> main) que lleve alguna label release-type/* y/o
+# db-release-type/*. El caller declara el trigger `pull_request: types:
+# [closed]` y pasa el evento tal cual: este workflow lee
+# github.event.pull_request directamente (es el mismo run).
+
+on:
+  workflow_call:
+    inputs:
+      code_paths_regex:
+        description: "ERE de rutas que cuentan como cambio de codigo versionable"
+        type: string
+        required: true
+      changelog_file:
+        description: "Fichero de changelog de codigo"
+        type: string
+        default: 'CHANGELOG.md'
+      db_paths_regex:
+        description: "ERE de rutas de migraciones de BD. Vacio = sin linea de BD"
+        type: string
+        default: ''
+      db_changelog_file:
+        description: "Fichero de changelog de BD"
+        type: string
+        default: 'CHANGELOG-DB.md'
+      toolkit_ref:
+        description: "Ref de release-toolkit del que se traen los scripts (fijalo al mismo tag que pusiste en 'uses:' para evitar drift)"
+        type: string
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: publish-to-main-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event.pull_request.merged == true &&
+      (
+        github.event.pull_request.head.ref == 'develop' ||
+        startsWith(github.event.pull_request.head.ref, 'hotfix/')
+      ) &&
+      (
+        contains(github.event.pull_request.labels.*.name, 'release-type/patch') ||
+        contains(github.event.pull_request.labels.*.name, 'release-type/minor') ||
+        contains(github.event.pull_request.labels.*.name, 'release-type/major') ||
+        contains(github.event.pull_request.labels.*.name, 'db-release-type/patch') ||
+        contains(github.event.pull_request.labels.*.name, 'db-release-type/minor') ||
+        contains(github.event.pull_request.labels.*.name, 'db-release-type/major')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Checkout scripts de release-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: Jabbcode/release-toolkit
+          ref: ${{ inputs.toolkit_ref }}
+          path: .release-toolkit
+
+      # ---------------------------------------------------------------------
+      # Pista de CODIGO
+      # ---------------------------------------------------------------------
+      - name: Determinar tipo de bump de codigo
+        id: bump
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$LABELS" | grep -q 'release-type/major'; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q 'release-type/minor'; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q 'release-type/patch'; then
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comprobar cambios de codigo
+        id: codecheck
+        if: steps.bump.outputs.type != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REGEX: ${{ inputs.code_paths_regex }}
+        run: |
+          set -euo pipefail
+          rc=0
+          bash .release-toolkit/.github/scripts/changed-paths.sh "$BASE_SHA" "$HEAD_SHA" "$REGEX" || rc=$?
+          case "$rc" in
+            0) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "changed-paths.sh fallo (rc=$rc)"; exit "$rc" ;;
+          esac
+
+      - name: Avisar que no hubo cambios de codigo
+        if: steps.bump.outputs.type != 'none' && steps.codecheck.outputs.has_changes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "⚠️ Este PR lleva label \`release-type/*\` pero no toca rutas versionables de código — no se generó ninguna versión de código."
+
+      - name: Calcular nueva version de codigo
+        id: version
+        if: steps.bump.outputs.type != 'none' && steps.codecheck.outputs.has_changes == 'true'
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+        run: |
+          set -euo pipefail
+          current=$(node -p "require('./package.json').version")
+          new=$(bash .release-toolkit/.github/scripts/bump-version.sh "$current" "$BUMP_TYPE")
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "previous=$current" >> "$GITHUB_OUTPUT"
+
+      - name: Bump package.json
+        if: steps.version.outputs.new != ''
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          node -e "const fs=require('fs');const p=require('./package.json');p.version=process.env.NEW_VERSION;fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+
+      - name: Generar changelog de codigo del rango
+        if: steps.version.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREV_VERSION: ${{ steps.version.outputs.previous }}
+        run: |
+          prev_tag="v${PREV_VERSION}"
+          if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+            from_ref="$prev_tag"
+          else
+            from_ref=$(git rev-list --max-parents=0 HEAD | tail -1)
+          fi
+          bash .release-toolkit/.github/scripts/build-changelog.sh "$from_ref" HEAD > /tmp/notes.md || true
+          if [ ! -s /tmp/notes.md ]; then
+            echo "_Sin cambios categorizados en el rango._" > /tmp/notes.md
+          fi
+
+      - name: Actualizar changelog de codigo
+        if: steps.version.outputs.new != ''
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          PREV_VERSION: ${{ steps.version.outputs.previous }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+        run: |
+          date=$(date +%Y-%m-%d)
+          {
+            head -n 6 "$CHANGELOG_FILE"
+            echo ""
+            echo "<a id=\"v${NEW_VERSION}\"></a>"
+            echo "## [${NEW_VERSION}] - $date"
+            echo ""
+            cat /tmp/notes.md
+            echo ""
+            tail -n +7 "$CHANGELOG_FILE"
+          } > /tmp/changelog-new.md
+          mv /tmp/changelog-new.md "$CHANGELOG_FILE"
+
+          range="v${PREV_VERSION}...v${NEW_VERSION}"
+          compare_url="https://github.com/${{ github.repository }}/compare/${range}"
+          bullet="- [$range]($compare_url)"
+          if grep -q "^## Comparaciones completas$" "$CHANGELOG_FILE"; then
+            awk -v bullet="$bullet" '
+              {
+                print
+                if ($0 ~ /^## Comparaciones completas$/ && !done) {
+                  getline nextline
+                  print nextline
+                  print bullet
+                  done = 1
+                }
+              }
+            ' "$CHANGELOG_FILE" > /tmp/changelog-with-link.md
+            mv /tmp/changelog-with-link.md "$CHANGELOG_FILE"
+          else
+            {
+              cat "$CHANGELOG_FILE"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## Comparaciones completas"
+              echo ""
+              echo "$bullet"
+            } > /tmp/changelog-with-link.md
+            mv /tmp/changelog-with-link.md "$CHANGELOG_FILE"
+          fi
+
+      - name: Commit del release de codigo
+        if: steps.version.outputs.new != ''
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json "$CHANGELOG_FILE"
+          git commit -m "chore: release v${NEW_VERSION}"
+          git pull --rebase origin main
+          git push origin main
+
+      - name: Tag y GitHub Release de codigo
+        if: steps.version.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+        run: |
+          git tag "v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
+          # El detalle completo ya vive en el CHANGELOG (anclado en v${NEW_VERSION});
+          # el body del release solo enlaza ahi en vez de repetir todo el contenido.
+          changelog_url="https://github.com/${{ github.repository }}/blob/main/${CHANGELOG_FILE}#v${NEW_VERSION}"
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION}" \
+            --notes "Ver el detalle completo en el [CHANGELOG](${changelog_url})."
+
+      # ---------------------------------------------------------------------
+      # Pista de BASE DE DATOS (opcional — solo si db_paths_regex no esta vacio)
+      # ---------------------------------------------------------------------
+      - name: Determinar tipo de bump de BD
+        id: dbbump
+        if: inputs.db_paths_regex != ''
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$LABELS" | grep -q 'db-release-type/major'; then
+            echo "type=major" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q 'db-release-type/minor'; then
+            echo "type=minor" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q 'db-release-type/patch'; then
+            echo "type=patch" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comprobar cambios de BD
+        id: dbcheck
+        if: inputs.db_paths_regex != '' && steps.dbbump.outputs.type != 'none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REGEX: ${{ inputs.db_paths_regex }}
+        run: |
+          set -euo pipefail
+          rc=0
+          bash .release-toolkit/.github/scripts/changed-paths.sh "$BASE_SHA" "$HEAD_SHA" "$REGEX" || rc=$?
+          case "$rc" in
+            0) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "changed-paths.sh fallo (rc=$rc)"; exit "$rc" ;;
+          esac
+
+      - name: Avisar que no hubo cambios de BD
+        if: inputs.db_paths_regex != '' && steps.dbbump.outputs.type != 'none' && steps.dbcheck.outputs.has_changes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "⚠️ Este PR lleva label \`db-release-type/*\` pero no toca rutas de migraciones — no se generó ninguna versión de BD."
+
+      - name: Calcular nueva version de BD
+        id: dbversion
+        if: inputs.db_paths_regex != '' && steps.dbbump.outputs.type != 'none' && steps.dbcheck.outputs.has_changes == 'true'
+        env:
+          BUMP_TYPE: ${{ steps.dbbump.outputs.type }}
+        run: |
+          set -euo pipefail
+          current_tag=$(git tag --list 'db-v*' | sort -V | tail -1)
+          if [ -z "$current_tag" ]; then
+            current="0.0.0"
+            has_previous=false
+          else
+            current="${current_tag#db-v}"
+            has_previous=true
+          fi
+          new=$(bash .release-toolkit/.github/scripts/bump-version.sh "$current" "$BUMP_TYPE")
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "previous=$current" >> "$GITHUB_OUTPUT"
+          echo "has_previous=$has_previous" >> "$GITHUB_OUTPUT"
+
+      - name: Generar changelog de BD del rango
+        if: steps.dbversion.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAS_PREVIOUS: ${{ steps.dbversion.outputs.has_previous }}
+          PREV_VERSION: ${{ steps.dbversion.outputs.previous }}
+          REGEX: ${{ inputs.db_paths_regex }}
+        run: |
+          if [ "$HAS_PREVIOUS" = "true" ]; then
+            from_ref="db-v${PREV_VERSION}"
+          else
+            from_ref=$(git rev-list --max-parents=0 HEAD | tail -1)
+          fi
+          bash .release-toolkit/.github/scripts/build-changelog.sh "$from_ref" HEAD \
+            --only-paths "$REGEX" > /tmp/db-notes.md || true
+          if [ ! -s /tmp/db-notes.md ]; then
+            echo "_Sin migraciones categorizadas en el rango._" > /tmp/db-notes.md
+          fi
+
+      - name: Actualizar changelog de BD
+        if: steps.dbversion.outputs.new != ''
+        env:
+          NEW_VERSION: ${{ steps.dbversion.outputs.new }}
+          PREV_VERSION: ${{ steps.dbversion.outputs.previous }}
+          HAS_PREVIOUS: ${{ steps.dbversion.outputs.has_previous }}
+          DB_CHANGELOG_FILE: ${{ inputs.db_changelog_file }}
+        run: |
+          date=$(date +%Y-%m-%d)
+          {
+            head -n 6 "$DB_CHANGELOG_FILE"
+            echo ""
+            echo "<a id=\"db-v${NEW_VERSION}\"></a>"
+            echo "## [${NEW_VERSION}] - $date"
+            echo ""
+            cat /tmp/db-notes.md
+            echo ""
+            tail -n +7 "$DB_CHANGELOG_FILE"
+          } > /tmp/db-changelog-new.md
+          mv /tmp/db-changelog-new.md "$DB_CHANGELOG_FILE"
+
+          if [ "$HAS_PREVIOUS" = "true" ]; then
+            range="db-v${PREV_VERSION}...db-v${NEW_VERSION}"
+            compare_url="https://github.com/${{ github.repository }}/compare/${range}"
+            bullet="- [$range]($compare_url)"
+            awk -v bullet="$bullet" '
+              {
+                print
+                if ($0 ~ /^## Comparaciones completas$/ && !done) {
+                  getline nextline
+                  print nextline
+                  print bullet
+                  done = 1
+                }
+              }
+            ' "$DB_CHANGELOG_FILE" > /tmp/db-changelog-link.md
+            mv /tmp/db-changelog-link.md "$DB_CHANGELOG_FILE"
+          fi
+
+      - name: Commit del release de BD
+        if: steps.dbversion.outputs.new != ''
+        env:
+          NEW_VERSION: ${{ steps.dbversion.outputs.new }}
+          DB_CHANGELOG_FILE: ${{ inputs.db_changelog_file }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$DB_CHANGELOG_FILE"
+          git commit -m "db: release db-v${NEW_VERSION}"
+          git pull --rebase origin main
+          git push origin main
+
+      - name: Tag y GitHub Release de BD
+        if: steps.dbversion.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.dbversion.outputs.new }}
+          DB_CHANGELOG_FILE: ${{ inputs.db_changelog_file }}
+        run: |
+          git tag "db-v${NEW_VERSION}"
+          git push origin "db-v${NEW_VERSION}"
+          changelog_url="https://github.com/${{ github.repository }}/blob/main/${DB_CHANGELOG_FILE}#db-v${NEW_VERSION}"
+          gh release create "db-v${NEW_VERSION}" \
+            --title "Base de datos db-v${NEW_VERSION}" \
+            --notes "Ver el detalle completo en el [CHANGELOG-DB](${changelog_url})."
+
+      # ---------------------------------------------------------------------
+      # PR de sync a develop (uno solo, cubre codigo y/o BD)
+      # ---------------------------------------------------------------------
+      - name: Crear PR de sync a develop
+        if: steps.version.outputs.new != '' || steps.dbversion.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CODE_VERSION: ${{ steps.version.outputs.new }}
+          DB_VERSION: ${{ steps.dbversion.outputs.new }}
+        run: |
+          existing=$(gh pr list --base develop --head main --state open --json number --jq 'length')
+          if [ "$existing" -gt 0 ]; then
+            echo "Ya hay un PR de sync main -> develop abierto; nada que crear."
+            exit 0
+          fi
+
+          if [ -n "$CODE_VERSION" ] && [ -n "$DB_VERSION" ]; then
+            title="Sync release v${CODE_VERSION} + DB db-v${DB_VERSION} to develop"
+            body="Sincroniza \`develop\` con v${CODE_VERSION} y db-v${DB_VERSION} publicados en \`main\`."
+          elif [ -n "$CODE_VERSION" ]; then
+            title="Sync release v${CODE_VERSION} to develop"
+            body="Sincroniza \`develop\` con v${CODE_VERSION} publicado en \`main\`."
+          else
+            title="Sync DB release db-v${DB_VERSION} to develop"
+            body="Sincroniza \`develop\` con db-v${DB_VERSION} publicado en \`main\`."
+          fi
+
+          if ! gh pr create --base develop --head main --title "$title" --body "$body"; then
+            gh pr comment "$PR_NUMBER" \
+              --body "⚠️ Release publicada (tag + GitHub Release), pero no se pudo abrir el PR de sync \`main → develop\` automáticamente. Créalo a mano."
+          fi
+
+      - name: Comentar fallo del release
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "❌ Falló la publicación del release. No hay rollback automático: revisa el run, corrige y vuelve a lanzarlo.
+
+          [Ver run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"

@@ -1,0 +1,80 @@
+name: CI (Node) — reusable
+
+# Pipeline generico de CI para proyectos Node/TypeScript: install, typecheck,
+# test, build y verificacion del output. Prisma y lint son opcionales via
+# inputs porque no todos los proyectos los usan.
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: "Version de Node (ver actions/setup-node)"
+        type: string
+        default: '20.x'
+      run_prisma:
+        description: "Generar y validar el schema de Prisma"
+        type: boolean
+        default: false
+      lint_command:
+        description: "Comando de lint. Vacio = se salta este paso"
+        type: string
+        default: ''
+      test_command:
+        description: "Comando de tests"
+        type: string
+        default: 'npm test'
+      build_command:
+        description: "Comando de build"
+        type: string
+        default: 'npm run build'
+      build_output_dir:
+        description: "Carpeta que debe existir tras el build"
+        type: string
+        default: 'dist'
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        if: inputs.run_prisma
+        run: npx prisma generate
+
+      - name: Validate Prisma Schema
+        if: inputs.run_prisma
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/dbname
+        run: npx prisma validate
+
+      - name: TypeScript compilation check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        if: inputs.lint_command != ''
+        run: ${{ inputs.lint_command }}
+
+      - name: Run tests
+        run: ${{ inputs.test_command }}
+
+      - name: Build project
+        run: ${{ inputs.build_command }}
+
+      - name: Check build output
+        run: |
+          if [ ! -d "${{ inputs.build_output_dir }}" ]; then
+            echo "Build failed: ${{ inputs.build_output_dir }} directory not found"
+            exit 1
+          fi
+          echo "Build successful: ${{ inputs.build_output_dir }} directory created"

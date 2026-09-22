@@ -1,0 +1,19 @@
+name: Deploy Version (manual)
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  deploy:
+    uses: Jabbcode/release-toolkit/.github/workflows/deploy-vercel.yml@v1.0.0
+    with:
+      # Dominios fijos a los que se re-aliasan los slots de snapshot. Creas
+      # estos alias en Vercel una vez; el workflow los reapunta en cada deploy.
+      alias_pre: 'TU-APP-pre.vercel.app'
+      alias_pre_test: 'TU-APP-pre-test.vercel.app'
+      # Nombre de la repo var que trae la URL de la API en produccion.
+      api_url_prod_var: 'VITE_API_URL_PROD'
+    secrets: inherit

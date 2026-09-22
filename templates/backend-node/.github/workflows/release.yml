@@ -1,0 +1,19 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  release:
+    uses: Jabbcode/release-toolkit/.github/workflows/release.yml@v1.0.0
+    with:
+      # Rutas cuyo cambio cuenta como "cambio de código" versionable en este
+      # repo. Ajusta segun tu estructura real.
+      code_paths_regex: '^(src/|prisma/|package\.json$|package-lock\.json$|tsconfig\.json$|render\.yaml$)'
+      # Rutas de migraciones de BD. Deja vacio ("") si este proyecto no tiene
+      # base de datos versionada por separado.
+      db_paths_regex: 'prisma/migrations|prisma/schema\.prisma'
+      toolkit_ref: v1.0.0
+    secrets: inherit

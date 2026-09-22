@@ -1,0 +1,15 @@
+name: Release Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, unlabeled]
+    branches: [main]
+
+jobs:
+  preview:
+    uses: Jabbcode/release-toolkit/.github/workflows/release-preview.yml@v1.0.0
+    with:
+      code_paths_regex: '^(src/|prisma/|package\.json$|package-lock\.json$|tsconfig\.json$|render\.yaml$)'
+      db_paths_regex: 'prisma/migrations|prisma/schema\.prisma'
+      toolkit_ref: v1.0.0
+    secrets: inherit

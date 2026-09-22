@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  ci:
+    uses: Jabbcode/release-toolkit/.github/workflows/ci-node.yml@v1.0.0
+    with:
+      run_prisma: true
+      test_command: 'npm test'
+      lint_command: ''

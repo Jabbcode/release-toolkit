@@ -1,0 +1,16 @@
+name: Deploy Version (manual)
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  deploy:
+    uses: Jabbcode/release-toolkit/.github/workflows/deploy-render.yml@v1.0.0
+    with:
+      # Opcional: URL publica del servicio de produccion, solo para el
+      # mensaje de resultado en el issue.
+      prod_url: 'https://TU-SERVICIO.onrender.com'
+    secrets: inherit

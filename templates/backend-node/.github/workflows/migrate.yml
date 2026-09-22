@@ -1,0 +1,12 @@
+name: Migrate DB (manual)
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  migrate:
+    uses: Jabbcode/release-toolkit/.github/workflows/migrate-prisma.yml@v1.0.0
+    secrets: inherit
