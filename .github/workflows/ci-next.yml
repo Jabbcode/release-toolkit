@@ -1,0 +1,99 @@
+name: CI (Next + pnpm) — reusable
+
+# Pipeline de CI para proyectos Next.js con pnpm y Prisma: install con
+# lockfile congelado, prisma generate + validate, typecheck, lint, test, build
+# y verificacion del output. Equivalente a ci-node.yml pero con pnpm (aquel
+# es solo para npm y no se modifica).
+#
+# El caller declara el trigger (pull_request y push a develop/main).
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: "Version de Node (ver actions/setup-node)"
+        type: string
+        default: '22.x'
+      pnpm_version:
+        description: "Version de pnpm que instala pnpm/action-setup (mayor, ej. 12)"
+        type: string
+        default: '12'
+      lint_command:
+        description: "Comando de lint. Vacio = se salta este paso"
+        type: string
+        default: 'pnpm lint'
+      test_command:
+        description: "Comando de tests"
+        type: string
+        default: 'pnpm test'
+      build_command:
+        description: "Comando de build"
+        type: string
+        default: 'pnpm build'
+      build_output_dir:
+        description: "Carpeta que debe existir tras el build"
+        type: string
+        default: '.next'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      # Solo para prisma generate/validate: no se conecta a ninguna BD.
+      DATABASE_URL: postgresql://user:password@localhost:5432/dbname
+      DIRECT_URL: postgresql://user:password@localhost:5432/dbname
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm_version }}
+
+      - name: Setup Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm exec prisma generate
+
+      - name: Validate Prisma Schema
+        run: pnpm exec prisma validate
+
+      - name: TypeScript compilation check
+        run: pnpm exec tsc --noEmit
+
+      - name: Lint
+        if: inputs.lint_command != ''
+        env:
+          CMD: ${{ inputs.lint_command }}
+        run: bash -c "$CMD"
+
+      - name: Run tests
+        env:
+          CMD: ${{ inputs.test_command }}
+        run: bash -c "$CMD"
+
+      - name: Build project
+        env:
+          CMD: ${{ inputs.build_command }}
+        run: bash -c "$CMD"
+
+      - name: Check build output
+        env:
+          OUTPUT_DIR: ${{ inputs.build_output_dir }}
+        run: |
+          if [ ! -d "$OUTPUT_DIR" ]; then
+            echo "Build failed: $OUTPUT_DIR directory not found"
+            exit 1
+          fi
+          echo "Build successful: $OUTPUT_DIR directory created"
