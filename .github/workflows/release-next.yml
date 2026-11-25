@@ -38,6 +38,10 @@ on:
         description: "Ref de release-toolkit del que se traen los scripts (mismo tag que en 'uses:')"
         type: string
         default: 'main'
+      toolkit_repository:
+        description: "Repositorio de release-toolkit (owner/nombre). Solo cámbialo en un fork"
+        type: string
+        default: 'Jabbcode/release-toolkit'
 
 permissions:
   contents: write
@@ -69,7 +73,7 @@ jobs:
       - name: Checkout scripts de release-toolkit
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          repository: Jabbcode/release-toolkit
+          repository: ${{ inputs.toolkit_repository }}
           ref: ${{ inputs.toolkit_ref }}
           path: toolkit
 
