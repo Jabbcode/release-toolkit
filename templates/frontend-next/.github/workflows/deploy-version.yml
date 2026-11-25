@@ -13,8 +13,8 @@ permissions:
 
 jobs:
   deploy:
-    uses: Jabbcode/release-toolkit/.github/workflows/deploy-vercel-next.yml@v1.1.2
+    uses: Jabbcode/release-toolkit/.github/workflows/deploy-vercel-next.yml@v1.1.3
     with:
-      toolkit_ref: v1.1.2
+      toolkit_ref: v1.1.3
       toolkit_repository: Jabbcode/release-toolkit
     secrets: inherit

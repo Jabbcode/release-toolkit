@@ -15,15 +15,18 @@ invoca.
 
 ## Setup único de la cuenta (una sola vez, no por proyecto)
 
-Este repo es **privado**. Para que otros repos tuyos puedan llamar a sus
-workflows reusables:
+Los reusables traen sus scripts con un `actions/checkout` de este repo. Eso lo
+hace el `GITHUB_TOKEN` del repo que llama, que **no puede leer el contenido de
+un repo privado de otro**: con este repo privado, `release`, `release-preview` y
+`deploy` fallan con «repository not found» (solo los workflows que no hacen
+checkout, como `ci-*`, funcionan). Dos opciones:
 
-1. Entra a **Settings → Actions → General** de este repo (`release-toolkit`).
-2. En la sección **Access**, marca "Accessible from repositories in the
-   'Jabbcode' account" (o el equivalente en tu cuenta/organización).
-
-Sin esto, cualquier caller de otro repo falla con un error de permisos al
-intentar `uses: Jabbcode/release-toolkit/...`.
+- **Recomendada: repo público.** Solo contiene workflows y scripts, sin secretos.
+  Es lo que usa Jabbcode/release-toolkit y no necesita ningún paso por proyecto.
+- Repo privado: además del ajuste **Settings → Actions → General → Access**
+  ("Accessible from repositories owned by the user", que permite el `uses:`),
+  hace falta un token de lectura en cada proyecto y pasarlo al checkout. Este
+  repo no lo implementa.
 
 ## Workflows reusables (`.github/workflows/`)
 
@@ -60,7 +63,7 @@ Ver la skill `new-project-cicd` para hacerlo guiado.
 
 ## Versionado del propio toolkit
 
-Tags exactos (`v1.0.0`, `v1.1.0`, `v1.1.1`, `v1.1.2`, ...) — sin tag flotante `v1`. Cada caller
+Tags exactos (`v1.0.0`, `v1.1.0`, `v1.1.1`, `v1.1.2`, `v1.1.3`, ...) — sin tag flotante `v1`. Cada caller
 fija el tag exacto en `uses: .../workflow.yml@vX.Y.Z` **y** en el input
 `toolkit_ref` (deben coincidir: el segundo controla de qué ref se traen los
 scripts). Para actualizar un proyecto a una versión nueva del toolkit,

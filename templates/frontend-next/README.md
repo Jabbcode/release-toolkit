@@ -3,13 +3,30 @@
 Checklist para dejar operativo el flujo de CI, release y deploy en un
 proyecto Next.js con pnpm. Requiere que el setup único de acceso de
 `release-toolkit` ya esté hecho (ver su README). Los callers apuntan a
-`@v1.1.2` y fijan `toolkit_ref: v1.1.2` (deben coincidir). El nombre del
+`@v1.1.3` y fijan `toolkit_ref: v1.1.3` (deben coincidir). El nombre del
 repositorio del toolkit aparece solo en los callers (`uses:` y
 `toolkit_repository`): si usas un fork, cámbialo ahí y en ningún otro sitio.
 
 Diferencias con el kit `frontend-vite`: usa pnpm (`pnpm/action-setup@v4`, sin
 `npm ci` ni `npx`), solo despliega a producción (sin slots `PRE`/`PRE-TEST`),
 no tiene pista de versión de BD y el deploy no necesita etiqueta.
+
+## 0. Requisitos de GitHub (se descubren tarde si se olvidan)
+
+- **El toolkit debe ser legible desde tu repo** (ver el README raíz): con el
+  toolkit privado, `release`, `release-preview` y `deploy` fallan en el paso
+  «Checkout scripts de release-toolkit».
+- **Settings → Actions → General → Workflow permissions → «Allow GitHub Actions
+  to create and approve pull requests».** Sin esto el release publica el tag y
+  la Release pero falla al abrir el PR de sincronización (el comentario del
+  fallo lo indica y el PR se crea a mano).
+- **Registro de workflows:** si tras el primer push de un repo nuevo el
+  apartado Actions no muestra los workflows, haz un commit que modifique los
+  ficheros de `.github/workflows/` (basta un comentario). GitHub no escanea los
+  que llegan en el push inicial de un repo vacío.
+- **Los tres secretos de Vercel son obligatorios** incluso para rechazar
+  órdenes: sin ellos el run de `/deploy` falla al evaluar los secretos, antes
+  de leer la orden, y no comenta nada en el issue.
 
 ## 1. Copiar estos archivos al proyecto
 
