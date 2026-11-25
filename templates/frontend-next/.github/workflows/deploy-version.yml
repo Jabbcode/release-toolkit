@@ -9,12 +9,13 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write
   actions: read
 
 jobs:
   deploy:
-    uses: Jabbcode/release-toolkit/.github/workflows/deploy-vercel-next.yml@v1.1.3
+    uses: Jabbcode/release-toolkit/.github/workflows/deploy-vercel-next.yml@v1.1.4
     with:
-      toolkit_ref: v1.1.3
+      toolkit_ref: v1.1.4
       toolkit_repository: Jabbcode/release-toolkit
     secrets: inherit

@@ -55,6 +55,7 @@ on:
 permissions:
   contents: read
   issues: write
+  pull-requests: write # comentar el rechazo de `/deploy` en un PR
   actions: read
 
 jobs:
@@ -167,7 +168,6 @@ jobs:
             *)
               msg="No se despliega: orden no valida. Usa exactamente \`/deploy vX.Y.Z\` (ej. \`/deploy v1.3.7\`) en una linea." ;;
           esac
-          # REST: `gh issue comment` (GraphQL) exige pull-requests:write si la orden llega en un PR.
           gh api -X POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -f body="$msg
 
           [Ver run]($RUN_URL)"
