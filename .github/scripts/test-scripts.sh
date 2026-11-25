@@ -87,6 +87,39 @@ check "A9 parse: texto previo + texto extra -> malformed" "reason=malformed|1" \
 check "A9 parse: gana la primera orden" "version=1.0.0|0" \
   "$(parse '/deploy v1.0.0\n/deploy v2.0.0\n')"
 
+# --- tag-exists.sh, changelog-range.sh y has-code-changes.sh (repos temporales) ---
+tmp=$(mktemp -d)
+git init -q --bare "$tmp/origin.git"
+git init -q "$tmp/work"
+(
+  cd "$tmp/work" || exit 1
+  git config user.email t@example.com
+  git config user.name tester
+  git remote add origin "$tmp/origin.git"
+  git commit --allow-empty -qm "feat: primera"
+  git tag v1.0.0
+  git push -q origin v1.0.0
+)
+
+tag_exists() { (cd "$tmp/work" && bash "$DIR/tag-exists.sh" "$1"); }
+check "A20 tag-exists: tag publicado -> true" "exists=true" "$(tag_exists v1.0.0)"
+check "A20 tag-exists: tag inexistente -> false" "exists=false" "$(tag_exists v9.9.9)"
+check "A20 tag-exists: sin argumentos -> exit 2" "2" \
+  "$(bash "$DIR/tag-exists.sh" >/dev/null 2>&1; echo $?)"
+
+notes="$tmp/notes.md"
+(cd "$tmp/work" && bash "$DIR/changelog-range.sh" 1.0.0 "_sin cambios_" "$notes" 2>/dev/null)
+check "A21 changelog-range: rango vacío -> texto de reserva" "_sin cambios_" "$(cat "$notes")"
+(cd "$tmp/work" && bash "$DIR/changelog-range.sh" 9.9.9 "_sin cambios_" "$notes" 2>/dev/null)
+check "A21 changelog-range: sin tag previo parte del primer commit" "no-vacio" \
+  "$([[ -s "$notes" ]] && echo no-vacio || echo vacio)"
+check "A21 changelog-range: argumentos incorrectos -> exit 2" "2" \
+  "$(bash "$DIR/changelog-range.sh" >/dev/null 2>&1; echo $?)"
+
+check "A22 has-code-changes: argumentos incorrectos -> exit 2" "2" \
+  "$(bash "$DIR/has-code-changes.sh" >/dev/null 2>&1; echo $?)"
+rm -rf "$tmp"
+
 echo "---"
 echo "pasan: $pass, fallan: $fail"
 [[ "$fail" -eq 0 ]]

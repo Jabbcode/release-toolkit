@@ -67,14 +67,14 @@ jobs:
       # Primer paso: si el toolkit no es accesible, el flujo falla aqui sin
       # haber escrito nada.
       - name: Checkout scripts de release-toolkit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Jabbcode/release-toolkit
           ref: ${{ inputs.toolkit_ref }}
           path: toolkit
 
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0
@@ -115,13 +115,7 @@ jobs:
           REGEX: ${{ inputs.code_paths_regex }}
         run: |
           set -euo pipefail
-          rc=0
-          bash "$TOOLKIT_DIR/.github/scripts/changed-paths.sh" "$BASE_SHA" "$HEAD_SHA" "$REGEX" || rc=$?
-          case "$rc" in
-            0) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "changed-paths.sh fallo (rc=$rc)"; exit "$rc" ;;
-          esac
+          bash "$TOOLKIT_DIR/.github/scripts/has-code-changes.sh" "$BASE_SHA" "$HEAD_SHA" "$REGEX" >> "$GITHUB_OUTPUT"
 
       - name: Avisar que no hubo cambios de codigo
         if: steps.codecheck.outputs.has_changes == 'false'
@@ -155,18 +149,13 @@ jobs:
           NEW_VERSION: ${{ steps.version.outputs.new }}
         run: |
           set -euo pipefail
-          rc=0
-          git ls-remote --exit-code --tags origin "refs/tags/v${NEW_VERSION}" >/dev/null || rc=$?
-          case "$rc" in
-            2) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
-            0)
-              echo "exists=true" >> "$GITHUB_OUTPUT"
-              gh pr comment "$PR_NUMBER" \
-                --body "No se publico nada: el tag \`v${NEW_VERSION}\` ya existe. Revisa la version de \`package.json\` y la etiqueta \`release-type/*\`. [Ver run](${RUN_URL})"
-              exit 1
-              ;;
-            *) echo "git ls-remote fallo (rc=$rc)"; exit "$rc" ;;
-          esac
+          result=$(bash "$TOOLKIT_DIR/.github/scripts/tag-exists.sh" "v${NEW_VERSION}")
+          echo "$result" >> "$GITHUB_OUTPUT"
+          if [ "$result" = "exists=true" ]; then
+            gh pr comment "$PR_NUMBER" \
+              --body "No se publico nada: el tag \`v${NEW_VERSION}\` ya existe. Revisa la version de \`package.json\` y la etiqueta \`release-type/*\`. [Ver run](${RUN_URL})"
+            exit 1
+          fi
 
       - name: Bump package.json
         if: steps.tagcheck.outputs.exists == 'false'
@@ -181,16 +170,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREV_VERSION: ${{ steps.version.outputs.previous }}
         run: |
-          prev_tag="v${PREV_VERSION}"
-          if git rev-parse "$prev_tag" >/dev/null 2>&1; then
-            from_ref="$prev_tag"
-          else
-            from_ref=$(git rev-list --max-parents=0 HEAD | tail -1)
-          fi
-          bash "$TOOLKIT_DIR/.github/scripts/build-changelog.sh" "$from_ref" HEAD > /tmp/notes.md || true
-          if [ ! -s /tmp/notes.md ]; then
-            echo "_Sin cambios categorizados en el rango._" > /tmp/notes.md
-          fi
+          bash "$TOOLKIT_DIR/.github/scripts/changelog-range.sh" "$PREV_VERSION" "_Sin cambios categorizados en el rango._" /tmp/notes.md
 
       - name: Actualizar changelog
         if: steps.tagcheck.outputs.exists == 'false'
