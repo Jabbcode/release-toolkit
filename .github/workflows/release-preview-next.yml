@@ -1,0 +1,171 @@
+name: Release Preview (Next) — reusable
+
+# Comenta (y va actualizando) en el PR un UNICO comentario con la version que
+# se publicaria y el changelog de vista previa, o con el motivo por el que no
+# se publicaria nada: sin etiqueta release-type/*, varias etiquetas, sin
+# ficheros de codigo o tag calculado ya existente. No publica ni despliega.
+# Sin pista de BD. No modifica release-preview.yml (reusable de otros kits).
+#
+# El caller declara el trigger:
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, labeled, unlabeled]
+#       branches: [main]
+
+on:
+  workflow_call:
+    inputs:
+      code_paths_regex:
+        description: "ERE de rutas que cuentan como cambio de codigo versionable"
+        type: string
+        required: true
+      toolkit_ref:
+        description: "Ref de release-toolkit del que se traen los scripts (mismo tag que en 'uses:')"
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: release-preview-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    # Mismos PR que publica release-next.yml: develop o hotfix/* hacia main.
+    if: >
+      (
+        github.event.pull_request.head.ref == 'develop' ||
+        startsWith(github.event.pull_request.head.ref, 'hotfix/')
+      ) &&
+      (
+        github.event.action == 'opened' ||
+        github.event.action == 'synchronize' ||
+        startsWith(github.event.label.name, 'release-type/')
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout de la HEAD del PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Checkout scripts de release-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: Jabbcode/release-toolkit
+          ref: ${{ inputs.toolkit_ref }}
+          path: .release-toolkit
+
+      - name: Determinar tipo de release
+        id: bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          type=$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' \
+            | bash .release-toolkit/.github/scripts/resolve-release-type.sh)
+          echo "type=$type" >> "$GITHUB_OUTPUT"
+
+      - name: Comprobar cambios de codigo
+        id: codecheck
+        if: contains(fromJSON('["patch","minor","major"]'), steps.bump.outputs.type)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REGEX: ${{ inputs.code_paths_regex }}
+        run: |
+          set -euo pipefail
+          rc=0
+          bash .release-toolkit/.github/scripts/changed-paths.sh "$BASE_SHA" "$HEAD_SHA" "$REGEX" || rc=$?
+          case "$rc" in
+            0) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "changed-paths.sh fallo (rc=$rc)"; exit "$rc" ;;
+          esac
+
+      - name: Calcular siguiente version y comprobar el tag
+        id: version
+        if: steps.codecheck.outputs.has_changes == 'true'
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+        run: |
+          set -euo pipefail
+          current=$(node -p "require('./package.json').version")
+          new=$(bash .release-toolkit/.github/scripts/bump-version.sh "$current" "$BUMP_TYPE")
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "previous=$current" >> "$GITHUB_OUTPUT"
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/v${new}" >/dev/null || rc=$?
+          case "$rc" in
+            0) echo "tag_exists=true" >> "$GITHUB_OUTPUT" ;;
+            2) echo "tag_exists=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "git ls-remote fallo (rc=$rc)"; exit "$rc" ;;
+          esac
+
+      - name: Generar changelog de vista previa
+        if: steps.version.outputs.tag_exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREV_VERSION: ${{ steps.version.outputs.previous }}
+        run: |
+          prev_tag="v${PREV_VERSION}"
+          if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+            from_ref="$prev_tag"
+          else
+            from_ref=$(git rev-list --max-parents=0 HEAD | tail -1)
+          fi
+          bash .release-toolkit/.github/scripts/build-changelog.sh "$from_ref" HEAD > /tmp/notes.md || true
+          if [ ! -s /tmp/notes.md ]; then
+            echo "_Sin cambios categorizados todavia._" > /tmp/notes.md
+          fi
+
+      - name: Construir comentario de vista previa
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+          HAS_CHANGES: ${{ steps.codecheck.outputs.has_changes }}
+          TAG_EXISTS: ${{ steps.version.outputs.tag_exists }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          PREV_VERSION: ${{ steps.version.outputs.previous }}
+        run: |
+          {
+            echo "<!-- release-preview-bot -->"
+            echo "## Vista previa del release"
+            echo ""
+            if [ "$BUMP_TYPE" = "none" ]; then
+              echo "No hay ninguna etiqueta \`release-type/patch\`, \`release-type/minor\` o \`release-type/major\` en este PR: al fusionar **no se publicara ninguna version**."
+            elif [ "$BUMP_TYPE" = "multiple" ]; then
+              echo "Hay mas de una etiqueta \`release-type/*\` en este PR: deja solo una. Mientras tanto, al fusionar **no se publicara ninguna version**."
+            elif [ "$HAS_CHANGES" != "true" ]; then
+              echo "Este PR tiene la etiqueta \`release-type/${BUMP_TYPE}\`, pero no toca ficheros de codigo: al fusionar **no se generara ninguna version**."
+            elif [ "$TAG_EXISTS" = "true" ]; then
+              echo "La version calculada **v${NEW_VERSION}** ya existe como tag: al fusionar **no se publicara nada** y el flujo terminara en error. Revisa la etiqueta \`release-type/*\` o la version de \`package.json\`."
+            else
+              echo "Al fusionar con la etiqueta \`release-type/${BUMP_TYPE}\` se publicara:"
+              echo ""
+              echo "**v${NEW_VERSION}** (actual: v${PREV_VERSION})"
+              echo ""
+              cat /tmp/notes.md
+            fi
+          } > /tmp/comment.md
+
+      - name: Publicar o actualizar el comentario
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          existing_id=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- release-preview-bot -->")) | .id' | sed -n 1p)
+          if [ -n "$existing_id" ]; then
+            jq -n --rawfile body /tmp/comment.md '{body: $body}' \
+              | gh api -X PATCH "repos/${REPO}/issues/comments/${existing_id}" --input -
+          else
+            gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md
+          fi

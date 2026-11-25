@@ -1,0 +1,252 @@
+name: Deploy Version (Vercel, Next) — reusable
+
+# Despliega a PRODUCCION en Vercel un tag vX.Y.Z existente, con la orden
+# `/deploy vX.Y.Z` escrita por el dueño del repositorio en un issue (cuerpo al
+# abrirlo) o en un comentario de issue. Sin etiqueta, sin slots de snapshot y
+# sin variables VITE_*. No modifica deploy-vercel.yml (reusable de otros kits).
+#
+# Rechazos (siempre con comentario del motivo en el issue; nada se despliega):
+#   - quien escribe no es el dueño (github.repository_owner)
+#   - el comentario esta en un PR (el despliegue solo se admite en issues)
+#   - orden sin version o mal formada
+#   - el tag vX.Y.Z no existe
+#   - ya hay otro deploy a produccion en curso, en cola o esperando aprobacion
+#
+# Requiere en el repo llamador:
+#   - secrets VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID
+#   - Environment "production" (gate de deploy a produccion)
+#
+# El caller declara el trigger:
+#   on:
+#     issues: { types: [opened] }
+#     issue_comment: { types: [created] }
+
+on:
+  workflow_call:
+    inputs:
+      toolkit_ref:
+        description: "Ref de release-toolkit del que se traen los scripts (mismo tag que en 'uses:')"
+        type: string
+        default: 'main'
+      node_version:
+        description: "Version de Node (ver actions/setup-node)"
+        type: string
+        default: '22.x'
+      pnpm_version:
+        description: "Version de pnpm que instala pnpm/action-setup (mayor, ej. 12)"
+        type: string
+        default: '12'
+      vercel_cli_version:
+        description: "Version EXACTA de la CLI de Vercel (nunca latest)"
+        type: string
+        default: '65.15.0'
+    secrets:
+      VERCEL_TOKEN:
+        required: true
+      VERCEL_ORG_ID:
+        required: true
+      VERCEL_PROJECT_ID:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  parse:
+    if: >
+      (
+        github.event_name == 'issues' &&
+        contains(github.event.issue.body, '/deploy')
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        startsWith(github.event.comment.body, '/deploy')
+      )
+    runs-on: ubuntu-latest
+    env:
+      TOOLKIT_DIR: ${{ github.workspace }}/toolkit
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      valid: ${{ steps.validate.outputs.valid }}
+      reason: ${{ steps.validate.outputs.reason }}
+      version: ${{ steps.validate.outputs.version }}
+      issue: ${{ github.event.issue.number }}
+    steps:
+      # Primer paso: si el toolkit no es accesible el flujo falla aqui y el
+      # job deploy-prod no se ejecuta.
+      - name: Checkout scripts de release-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: Jabbcode/release-toolkit
+          ref: ${{ inputs.toolkit_ref }}
+          path: toolkit
+
+      - name: Validar la orden
+        id: validate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          IS_PR: ${{ github.event.issue.pull_request != null }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+
+          reject() {
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+            echo "reason=$1" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ "$EVENT_NAME" = "issues" ]; then
+            raw="$ISSUE_BODY"
+            author="$ISSUE_AUTHOR"
+          else
+            raw="$COMMENT_BODY"
+            author="$COMMENT_AUTHOR"
+          fi
+
+          [ "${author,,}" = "${OWNER,,}" ] || reject not_owner
+          [ "$IS_PR" != "true" ] || reject pr_comment
+
+          parsed=$(printf '%s' "$raw" | bash "$TOOLKIT_DIR/.github/scripts/parse-deploy-command.sh") \
+            || reject "${parsed#reason=}"
+          version="${parsed#version=}"
+
+          gh api "repos/$REPO/git/ref/tags/v${version}" >/dev/null 2>&1 || reject tag_missing
+
+          # Otro deploy a produccion activo (en curso, en cola o esperando
+          # aprobacion) en cualquier ejecucion de este mismo workflow.
+          workflow_id=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .workflow_id)
+          for status in in_progress queued waiting; do
+            run_ids=$(gh api "repos/$REPO/actions/workflows/$workflow_id/runs?status=$status&per_page=100" \
+              --jq '.workflow_runs[].id')
+            for id in $run_ids; do
+              [ "$id" != "$RUN_ID" ] || continue
+              active=$(gh api "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
+                --jq '[.jobs[] | select(.name | endswith("deploy-prod")) | select(.status != "completed")] | length')
+              [ "$active" -eq 0 ] || reject deploy_active
+            done
+          done
+
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Comentar el rechazo
+        if: steps.validate.outputs.valid == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REASON: ${{ steps.validate.outputs.reason }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          case "$REASON" in
+            not_owner)
+              msg="No se despliega: solo el dueño del repositorio (\`${OWNER}\`) puede ordenar un deploy." ;;
+            pr_comment)
+              msg="No se despliega: \`/deploy\` solo se admite en issues, no en PRs. Abre un issue con \`/deploy vX.Y.Z\`." ;;
+            version_required)
+              msg="No se despliega: indica la version, por ejemplo \`/deploy v1.3.7\`." ;;
+            tag_missing)
+              msg="No se despliega: el tag de esa version no existe. Revisa las versiones publicadas con \`gh release list\`." ;;
+            deploy_active)
+              msg="No se despliega: ya hay otro deploy a produccion en curso, en cola o esperando aprobacion. Vuelve a lanzarlo cuando termine." ;;
+            *)
+              msg="No se despliega: orden no valida. Usa exactamente \`/deploy vX.Y.Z\` (ej. \`/deploy v1.3.7\`) en una linea." ;;
+          esac
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$msg
+
+          [Ver run]($RUN_URL)"
+
+  deploy-prod:
+    name: deploy-prod
+    needs: parse
+    if: needs.parse.outputs.valid == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    # Una sola ejecucion de deploy a la vez; la segunda espera, nunca en paralelo.
+    concurrency:
+      group: deploy-prod-${{ github.event.repository.name }}
+      cancel-in-progress: false
+    env:
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      VERCEL_CLI: vercel@${{ inputs.vercel_cli_version }}
+    steps:
+      - name: Checkout del tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/v${{ needs.parse.outputs.version }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm_version }}
+
+      - name: Setup Node.js ${{ inputs.node_version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Los secretos de Vercel solo existen en este paso (no en `pnpm install`,
+      # que ejecuta codigo de terceros). Si falla pull o build, produccion no
+      # cambia: solo el ultimo comando, `deploy --prebuilt --prod`, publica.
+      - name: Vercel pull, build y deploy
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm dlx "$VERCEL_CLI" pull --yes --environment=production --token="$VERCEL_TOKEN"
+          pnpm dlx "$VERCEL_CLI" build --prod --token="$VERCEL_TOKEN"
+          url=$(pnpm dlx "$VERCEL_CLI" deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Comentar resultado y cerrar el issue
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.parse.outputs.issue }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.parse.outputs.version }}
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "Desplegado \`v${VERSION}\` a produccion: ${URL}
+
+          [Ver run]($RUN_URL)"
+          gh issue close "$ISSUE_NUMBER" --repo "$REPO"
+
+      - name: Comentar fallo (el issue queda abierto)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ needs.parse.outputs.issue }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.parse.outputs.version }}
+          DEPLOYED: ${{ steps.deploy.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$DEPLOYED" = "success" ]; then
+            state="El deploy de \`v${VERSION}\` SI se publico, pero fallo un paso posterior."
+          else
+            state="Produccion no ha cambiado: el deploy de \`v${VERSION}\` no se publico."
+          fi
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "${state} No hay rollback automatico: revisa el run, corrige y vuelve a lanzar \`/deploy v${VERSION}\` en un issue nuevo.
+
+          [Ver run]($RUN_URL)"

@@ -1,0 +1,301 @@
+name: Release (Next) — reusable
+
+# Publica una version de CODIGO cuando se fusiona un PR develop o hotfix/* ->
+# main: bump + changelog + commit + tag + GitHub Release + PR de sync a
+# develop. NO despliega nada (eso es deploy-vercel-next.yml). Sin pista de BD.
+# No modifica release.yml (reusable de otros kits).
+#
+# Diferencias con release.yml (huecos que cubre):
+#   - Se ejecuta en TODO PR fusionado desde develop/hotfix/*: sin etiqueta o
+#     con varias etiquetas release-type/* comenta el motivo y no versiona;
+#     igual si no toca ficheros de codigo.
+#   - Comprueba que el tag v<nueva> no existe ANTES de cualquier escritura; si
+#     existe, comenta y termina en ERROR.
+#   - El checkout del toolkit es el primer paso: si falla (toolkit
+#     inaccesible) no se publica nada.
+#   - Orden commit -> tag -> Release -> PR de sync registrando cada paso en
+#     outputs; si algo falla, termina en error y comenta que se publico y que
+#     no.
+#
+# El caller declara el trigger:
+#   on:
+#     pull_request:
+#       types: [closed]
+#       branches: [main]
+
+on:
+  workflow_call:
+    inputs:
+      code_paths_regex:
+        description: "ERE de rutas que cuentan como cambio de codigo versionable"
+        type: string
+        required: true
+      changelog_file:
+        description: "Fichero de changelog de codigo (cabecera de 6 lineas)"
+        type: string
+        default: 'CHANGELOG.md'
+      toolkit_ref:
+        description: "Ref de release-toolkit del que se traen los scripts (mismo tag que en 'uses:')"
+        type: string
+        default: 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: publish-to-main-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      (
+        github.event.pull_request.head.ref == 'develop' ||
+        startsWith(github.event.pull_request.head.ref, 'hotfix/')
+      )
+    runs-on: ubuntu-latest
+    env:
+      TOOLKIT_DIR: ${{ github.workspace }}/toolkit
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    defaults:
+      run:
+        working-directory: repo
+    steps:
+      # Primer paso: si el toolkit no es accesible, el flujo falla aqui sin
+      # haber escrito nada.
+      - name: Checkout scripts de release-toolkit
+        uses: actions/checkout@v4
+        with:
+          repository: Jabbcode/release-toolkit
+          ref: ${{ inputs.toolkit_ref }}
+          path: toolkit
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          path: repo
+
+      - name: Determinar tipo de release
+        id: bump
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          type=$(printf '%s' "$LABELS" | jq -r '.[]' \
+            | bash "$TOOLKIT_DIR/.github/scripts/resolve-release-type.sh")
+          echo "type=$type" >> "$GITHUB_OUTPUT"
+
+      - name: Avisar de etiqueta ausente o multiple
+        if: steps.bump.outputs.type == 'none' || steps.bump.outputs.type == 'multiple'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+        run: |
+          set -euo pipefail
+          if [ "$BUMP_TYPE" = "none" ]; then
+            reason='este PR no tiene ninguna etiqueta `release-type/patch`, `release-type/minor` o `release-type/major`'
+          else
+            reason='este PR tiene mas de una etiqueta `release-type/*`'
+          fi
+          gh pr comment "$PR_NUMBER" --body "No se genero ninguna version: ${reason}. Para publicar, abre un PR nuevo con una sola etiqueta \`release-type/*\`."
+
+      - name: Comprobar cambios de codigo
+        id: codecheck
+        if: contains(fromJSON('["patch","minor","major"]'), steps.bump.outputs.type)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REGEX: ${{ inputs.code_paths_regex }}
+        run: |
+          set -euo pipefail
+          rc=0
+          bash "$TOOLKIT_DIR/.github/scripts/changed-paths.sh" "$BASE_SHA" "$HEAD_SHA" "$REGEX" || rc=$?
+          case "$rc" in
+            0) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            1) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "changed-paths.sh fallo (rc=$rc)"; exit "$rc" ;;
+          esac
+
+      - name: Avisar que no hubo cambios de codigo
+        if: steps.codecheck.outputs.has_changes == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" \
+            --body "No se genero ninguna version: este PR lleva etiqueta \`release-type/*\` pero no toca ficheros de codigo."
+
+      - name: Calcular nueva version
+        id: version
+        if: steps.codecheck.outputs.has_changes == 'true'
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
+        run: |
+          set -euo pipefail
+          current=$(node -p "require('./package.json').version")
+          new=$(bash "$TOOLKIT_DIR/.github/scripts/bump-version.sh" "$current" "$BUMP_TYPE")
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "previous=$current" >> "$GITHUB_OUTPUT"
+
+      # Antes de cualquier escritura (commit, tag, Release): el tag no debe
+      # existir ya en el remoto.
+      - name: Comprobar que el tag no existe
+        id: tagcheck
+        if: steps.version.outputs.new != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          set -euo pipefail
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/v${NEW_VERSION}" >/dev/null || rc=$?
+          case "$rc" in
+            2) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            0)
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              gh pr comment "$PR_NUMBER" \
+                --body "No se publico nada: el tag \`v${NEW_VERSION}\` ya existe. Revisa la version de \`package.json\` y la etiqueta \`release-type/*\`. [Ver run](${RUN_URL})"
+              exit 1
+              ;;
+            *) echo "git ls-remote fallo (rc=$rc)"; exit "$rc" ;;
+          esac
+
+      - name: Bump package.json
+        if: steps.tagcheck.outputs.exists == 'false'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          node -e "const fs=require('fs');const p=require('./package.json');p.version=process.env.NEW_VERSION;fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+
+      - name: Generar changelog del rango
+        if: steps.tagcheck.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREV_VERSION: ${{ steps.version.outputs.previous }}
+        run: |
+          prev_tag="v${PREV_VERSION}"
+          if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+            from_ref="$prev_tag"
+          else
+            from_ref=$(git rev-list --max-parents=0 HEAD | tail -1)
+          fi
+          bash "$TOOLKIT_DIR/.github/scripts/build-changelog.sh" "$from_ref" HEAD > /tmp/notes.md || true
+          if [ ! -s /tmp/notes.md ]; then
+            echo "_Sin cambios categorizados en el rango._" > /tmp/notes.md
+          fi
+
+      - name: Actualizar changelog
+        if: steps.tagcheck.outputs.exists == 'false'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          PREV_VERSION: ${{ steps.version.outputs.previous }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          date=$(date +%Y-%m-%d)
+          {
+            head -n 6 "$CHANGELOG_FILE"
+            echo ""
+            echo "<a id=\"v${NEW_VERSION}\"></a>"
+            echo "## [${NEW_VERSION}] - $date"
+            echo ""
+            echo "[Comparar v${PREV_VERSION}...v${NEW_VERSION}](https://github.com/${REPO}/compare/v${PREV_VERSION}...v${NEW_VERSION})"
+            echo ""
+            cat /tmp/notes.md
+            echo ""
+            tail -n +7 "$CHANGELOG_FILE"
+          } > /tmp/changelog-new.md
+          mv /tmp/changelog-new.md "$CHANGELOG_FILE"
+
+      - name: Commit del release
+        id: commit
+        if: steps.tagcheck.outputs.exists == 'false'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json "$CHANGELOG_FILE"
+          git commit -m "chore: release v${NEW_VERSION}"
+          git pull --rebase origin main
+          git push origin main
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      - name: Tag
+        id: tag
+        if: steps.commit.outputs.done == 'true'
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          set -euo pipefail
+          git tag "v${NEW_VERSION}"
+          git push origin "v${NEW_VERSION}"
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub Release
+        id: release
+        if: steps.tag.outputs.done == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          CHANGELOG_FILE: ${{ inputs.changelog_file }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          changelog_url="https://github.com/${REPO}/blob/main/${CHANGELOG_FILE}#v${NEW_VERSION}"
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION}" \
+            --notes "Ver el detalle completo en el [CHANGELOG](${changelog_url})."
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      - name: PR de sync a develop
+        id: sync
+        if: steps.release.outputs.done == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --base develop --head main --state open --json number --jq 'length')
+          if [ "$existing" -eq 0 ]; then
+            gh pr create --base develop --head main \
+              --title "Sync release v${NEW_VERSION} to develop" \
+              --body "Sincroniza \`develop\` con v${NEW_VERSION} publicado en \`main\`."
+          else
+            echo "Ya hay un PR de sync main -> develop abierto; nada que crear."
+          fi
+          echo "done=true" >> "$GITHUB_OUTPUT"
+
+      # Un fallo tras haber publicado algo deja constancia de que se publico y
+      # que no. El caso "tag ya existe" ya comento su propio motivo.
+      - name: Comentar fallo del release
+        if: failure() && steps.tagcheck.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          NEW_VERSION: ${{ steps.version.outputs.new }}
+          COMMITTED: ${{ steps.commit.outputs.done }}
+          TAGGED: ${{ steps.tag.outputs.done }}
+          RELEASED: ${{ steps.release.outputs.done }}
+          SYNCED: ${{ steps.sync.outputs.done }}
+        run: |
+          set -euo pipefail
+          st() { if [ "${1:-}" = "true" ]; then echo "publicado"; else echo "NO publicado"; fi; }
+          gh pr comment "$PR_NUMBER" --body "Fallo la publicacion del release${NEW_VERSION:+ v${NEW_VERSION}}. No hay rollback automatico. Estado final:
+          - commit de version en main: $(st "$COMMITTED")
+          - tag: $(st "$TAGGED")
+          - GitHub Release: $(st "$RELEASED")
+          - PR de sync a develop: $(st "$SYNCED")
+
+          Completa a mano lo que falte y revisa el run: ${RUN_URL}"
