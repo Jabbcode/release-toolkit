@@ -167,7 +167,8 @@ jobs:
             *)
               msg="No se despliega: orden no valida. Usa exactamente \`/deploy vX.Y.Z\` (ej. \`/deploy v1.3.7\`) en una linea." ;;
           esac
-          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$msg
+          # REST: `gh issue comment` (GraphQL) exige pull-requests:write si la orden llega en un PR.
+          gh api -X POST "repos/$REPO/issues/$ISSUE_NUMBER/comments" -f body="$msg
 
           [Ver run]($RUN_URL)"
 

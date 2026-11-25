@@ -11,9 +11,9 @@ permissions:
 
 jobs:
   release:
-    uses: Jabbcode/release-toolkit/.github/workflows/release-next.yml@v1.1.2
+    uses: Jabbcode/release-toolkit/.github/workflows/release-next.yml@v1.1.3
     with:
       code_paths_regex: '^(src/|prisma/|next\.config\.ts$|package\.json$|pnpm-lock\.yaml$|tsconfig\.json$|vercel\.json$)'
-      toolkit_ref: v1.1.2
+      toolkit_ref: v1.1.3
       toolkit_repository: Jabbcode/release-toolkit
     secrets: inherit
