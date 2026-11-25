@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: Jabbcode/release-toolkit/.github/workflows/ci-next.yml@v1.1.0

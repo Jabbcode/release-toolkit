@@ -1,0 +1,19 @@
+name: Deploy Version (manual)
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  actions: read
+
+jobs:
+  deploy:
+    uses: Jabbcode/release-toolkit/.github/workflows/deploy-vercel-next.yml@v1.1.0
+    with:
+      toolkit_ref: v1.1.0
+    secrets: inherit
