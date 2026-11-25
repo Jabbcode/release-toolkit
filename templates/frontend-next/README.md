@@ -3,7 +3,7 @@
 Checklist para dejar operativo el flujo de CI, release y deploy en un
 proyecto Next.js con pnpm. Requiere que el setup único de acceso de
 `release-toolkit` ya esté hecho (ver su README). Los callers apuntan a
-`@v1.1.3` y fijan `toolkit_ref: v1.1.3` (deben coincidir). El nombre del
+`@v1.1.4` y fijan `toolkit_ref: v1.1.4` (deben coincidir). El nombre del
 repositorio del toolkit aparece solo en los callers (`uses:` y
 `toolkit_repository`): si usas un fork, cámbialo ahí y en ningún otro sitio.
 
