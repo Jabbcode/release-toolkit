@@ -48,13 +48,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout de la HEAD del PR
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Checkout scripts de release-toolkit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Jabbcode/release-toolkit
           ref: ${{ inputs.toolkit_ref }}
@@ -81,13 +81,7 @@ jobs:
           REGEX: ${{ inputs.code_paths_regex }}
         run: |
           set -euo pipefail
-          rc=0
-          bash .release-toolkit/.github/scripts/changed-paths.sh "$BASE_SHA" "$HEAD_SHA" "$REGEX" || rc=$?
-          case "$rc" in
-            0) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "changed-paths.sh fallo (rc=$rc)"; exit "$rc" ;;
-          esac
+          bash .release-toolkit/.github/scripts/has-code-changes.sh "$BASE_SHA" "$HEAD_SHA" "$REGEX" >> "$GITHUB_OUTPUT"
 
       - name: Calcular siguiente version y comprobar el tag
         id: version
@@ -100,13 +94,7 @@ jobs:
           new=$(bash .release-toolkit/.github/scripts/bump-version.sh "$current" "$BUMP_TYPE")
           echo "new=$new" >> "$GITHUB_OUTPUT"
           echo "previous=$current" >> "$GITHUB_OUTPUT"
-          rc=0
-          git ls-remote --exit-code --tags origin "refs/tags/v${new}" >/dev/null || rc=$?
-          case "$rc" in
-            0) echo "tag_exists=true" >> "$GITHUB_OUTPUT" ;;
-            2) echo "tag_exists=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "git ls-remote fallo (rc=$rc)"; exit "$rc" ;;
-          esac
+          bash .release-toolkit/.github/scripts/tag-exists.sh "v${new}" | sed 's/^exists=/tag_exists=/' >> "$GITHUB_OUTPUT"
 
       - name: Generar changelog de vista previa
         if: steps.version.outputs.tag_exists == 'false'
@@ -114,16 +102,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PREV_VERSION: ${{ steps.version.outputs.previous }}
         run: |
-          prev_tag="v${PREV_VERSION}"
-          if git rev-parse "$prev_tag" >/dev/null 2>&1; then
-            from_ref="$prev_tag"
-          else
-            from_ref=$(git rev-list --max-parents=0 HEAD | tail -1)
-          fi
-          bash .release-toolkit/.github/scripts/build-changelog.sh "$from_ref" HEAD > /tmp/notes.md || true
-          if [ ! -s /tmp/notes.md ]; then
-            echo "_Sin cambios categorizados todavia._" > /tmp/notes.md
-          fi
+          bash .release-toolkit/.github/scripts/changelog-range.sh "$PREV_VERSION" "_Sin cambios categorizados todavia._" /tmp/notes.md
 
       - name: Construir comentario de vista previa
         env:

@@ -11,4 +11,4 @@ permissions:
 
 jobs:
   ci:
-    uses: Jabbcode/release-toolkit/.github/workflows/ci-next.yml@v1.1.0
+    uses: Jabbcode/release-toolkit/.github/workflows/ci-next.yml@v1.1.1

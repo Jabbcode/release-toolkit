@@ -3,7 +3,7 @@
 Checklist para dejar operativo el flujo de CI, release y deploy en un
 proyecto Next.js con pnpm. Requiere que el setup único de acceso de
 `release-toolkit` ya esté hecho (ver su README). Los callers apuntan a
-`@v1.1.0` y fijan `toolkit_ref: v1.1.0` (deben coincidir).
+`@v1.1.1` y fijan `toolkit_ref: v1.1.1` (deben coincidir).
 
 Diferencias con el kit `frontend-vite`: usa pnpm (`pnpm/action-setup@v4`, sin
 `npm ci` ni `npx`), solo despliega a producción (sin slots `PRE`/`PRE-TEST`),

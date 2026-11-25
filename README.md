@@ -60,7 +60,7 @@ Ver la skill `new-project-cicd` para hacerlo guiado.
 
 ## Versionado del propio toolkit
 
-Tags exactos (`v1.0.0`, `v1.1.0`, ...) — sin tag flotante `v1`. Cada caller
+Tags exactos (`v1.0.0`, `v1.1.0`, `v1.1.1`, ...) — sin tag flotante `v1`. Cada caller
 fija el tag exacto en `uses: .../workflow.yml@vX.Y.Z` **y** en el input
 `toolkit_ref` (deben coincidir: el segundo controla de qué ref se traen los
 scripts). Para actualizar un proyecto a una versión nueva del toolkit,
